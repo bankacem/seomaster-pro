@@ -1,0 +1,8 @@
+1. افتح تطبيق GitHub على هاتفك
+2. هل ترى واجهة فيها repositories؟
+3. اضغط ➕ (زائد) فوق
+4. اختر "New repository"
+5. اكتب الاسم: test-project
+6. اختر ✅ Public
+7. ✅ Add a README file
+8. اضغط "Create repository"
