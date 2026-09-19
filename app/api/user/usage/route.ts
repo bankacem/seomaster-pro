@@ -1,28 +1,32 @@
-import { createServerSupabaseClient } from "@/lib/supabase";
+import { getAuthenticatedUser } from "@/lib/auth";
+import { jsonError } from "@/lib/utils";
 
-export const runtime = "nodejs";
-
-export async function GET(): Promise<Response> {
+export async function GET() {
   try {
-    const supabase = await createServerSupabaseClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) return Response.json({ error: "Authentication required" }, { status: 401 });
+    const { user, supabase } = await getAuthenticatedUser();
+    if (!user) return jsonError("Authentication required", 401, "UNAUTHORIZED");
 
-    const monthStart = new Date();
-    monthStart.setUTCDate(1);
-    monthStart.setUTCHours(0, 0, 0, 0);
-    const { count, error } = await supabase
-      .from("analyses")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", user.id)
-      .gte("created_at", monthStart.toISOString());
-    if (error) throw error;
+    const [{ data: profile, error: profileError }, { count, error: analysesError }, { data: recent, error: recentError }] = await Promise.all([
+      supabase.from("profiles").select("plan, credits").eq("id", user.id).single(),
+      supabase.from("analyses").select("id", { count: "exact", head: true }).eq("user_id", user.id),
+      supabase.from("analyses").select("id, url, score, results, created_at").eq("user_id", user.id).order("created_at", { ascending: false }).limit(10),
+    ]);
 
-    const analysesThisMonth = count ?? 0;
-    const monthlyLimit = 5;
-    return Response.json({ data: { analysesThisMonth, monthlyLimit, remaining: Math.max(0, monthlyLimit - analysesThisMonth) } });
+    if (profileError || analysesError || recentError) {
+      console.error("Usage lookup failed:", profileError || analysesError || recentError);
+      return jsonError("Unable to load usage", 500, "USAGE_LOOKUP_FAILED");
+    }
+
+    return Response.json({
+      data: {
+        plan: profile.plan,
+        credits_left: profile.credits,
+        total_analyses: count || 0,
+        recent_analyses: recent || [],
+      },
+    });
   } catch (error) {
-    console.error("Usage route failed", error);
-    return Response.json({ error: "Unable to retrieve usage" }, { status: 500 });
+    console.error("Usage endpoint failed:", error);
+    return jsonError("Authentication service is not configured", 500, "AUTH_CONFIG_ERROR");
   }
 }

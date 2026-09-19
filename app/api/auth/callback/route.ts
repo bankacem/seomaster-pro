@@ -1,29 +1,19 @@
 import { NextResponse } from "next/server";
-import { createServerSupabaseClient } from "@/lib/supabase";
+import { createClient } from "@/lib/supabase/server";
+import { getAppUrl, jsonError } from "@/lib/utils";
 
-export const runtime = "nodejs";
-
-export async function GET(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  const code = url.searchParams.get("code");
-  const next = url.searchParams.get("next") ?? "/dashboard";
-
-  if (!code) {
-    return NextResponse.redirect(new URL("/login?error=missing_code", url.origin));
-  }
-
+export async function GET(request: Request) {
   try {
-    const supabase = await createServerSupabaseClient();
-    const { error } = await supabase.auth.exchangeCodeForSession(code);
-    if (error) {
-      console.error("Supabase auth callback failed", error);
-      return NextResponse.redirect(new URL("/login?error=auth_callback", url.origin));
-    }
+    const { searchParams } = new URL(request.url);
+    const code = searchParams.get("code");
+    if (!code) return jsonError("Missing OAuth callback code", 400, "MISSING_CODE");
 
-    const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/dashboard";
-    return NextResponse.redirect(new URL(safeNext, url.origin));
+    const supabase = await createClient();
+    const { error } = await supabase.auth.exchangeCodeForSession(code);
+    if (error) return jsonError(error.message, 400, "OAUTH_CALLBACK_FAILED");
+    return NextResponse.redirect(new URL("/api/user/me", getAppUrl()));
   } catch (error) {
-    console.error("Supabase auth callback error", error);
-    return NextResponse.redirect(new URL("/login?error=auth_callback", url.origin));
+    console.error("Auth callback failed:", error);
+    return jsonError("Authentication service is not configured", 500, "AUTH_CONFIG_ERROR");
   }
 }

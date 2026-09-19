@@ -1,1 +1,1 @@
-export type { Database } from "./index";
+export type { Database } from "@/lib/types";

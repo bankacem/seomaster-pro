@@ -1,148 +1,137 @@
--- SEOMaster Pro database schema for Supabase/Postgres.
--- Run this migration in the Supabase SQL editor.
+-- SEOMaster Pro backend schema.
+-- Run this file in the Supabase SQL Editor before using the protected APIs.
 
-create extension if not exists pgcrypto;
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
-create or replace function public.set_updated_at()
-returns trigger
-language plpgsql
-as $$
-begin
-  new.updated_at = timezone('utc', now());
-  return new;
-end;
-$$;
-
-create table if not exists public.profiles (
-  id uuid primary key references auth.users(id) on delete cascade,
-  email text unique,
-  full_name text,
-  avatar_url text,
-  plan text not null default 'free' check (plan in ('free', 'pro', 'enterprise')),
-  credits integer not null default 5 check (credits >= 0),
-  created_at timestamptz not null default timezone('utc', now()),
-  updated_at timestamptz not null default timezone('utc', now())
+CREATE TABLE IF NOT EXISTS profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users ON DELETE CASCADE,
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT,
+  avatar_url TEXT,
+  plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free','pro','enterprise')),
+  credits INTEGER NOT NULL DEFAULT 5 CHECK (credits >= 0),
+  stripe_customer_id TEXT UNIQUE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-create table if not exists public.analyses (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  content text not null,
-  url text,
-  score integer not null check (score between 0 and 100),
-  results jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default timezone('utc', now())
-);
-
-create table if not exists public.reports (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  analysis_id uuid not null references public.analyses(id) on delete cascade,
-  title text not null,
-  data jsonb not null default '{}'::jsonb,
-  created_at timestamptz not null default timezone('utc', now())
-);
-
-create table if not exists public.subscriptions (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  stripe_customer_id text,
-  stripe_subscription_id text unique,
-  plan text not null default 'free',
-  status text not null default 'inactive',
-  period_end timestamptz,
-  created_at timestamptz not null default timezone('utc', now())
-);
-
-create table if not exists public.usage_logs (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null references public.profiles(id) on delete cascade,
-  action text not null,
-  tokens_used integer not null default 0 check (tokens_used >= 0),
-  created_at timestamptz not null default timezone('utc', now())
-);
-
-create index if not exists analyses_user_id_idx on public.analyses(user_id);
-create index if not exists analyses_created_at_idx on public.analyses(created_at desc);
-create index if not exists reports_user_id_idx on public.reports(user_id);
-create index if not exists reports_created_at_idx on public.reports(created_at desc);
-create index if not exists subscriptions_user_id_idx on public.subscriptions(user_id);
-create index if not exists subscriptions_created_at_idx on public.subscriptions(created_at desc);
-create index if not exists usage_logs_user_id_idx on public.usage_logs(user_id);
-create index if not exists usage_logs_created_at_idx on public.usage_logs(created_at desc);
-
- drop trigger if exists profiles_set_updated_at on public.profiles;
-create trigger profiles_set_updated_at
-before update on public.profiles
-for each row execute function public.set_updated_at();
-
-create or replace function public.handle_new_user()
-returns trigger
-security definer
-set search_path = public
-language plpgsql
-as $$
-begin
-  insert into public.profiles (id, email, full_name, avatar_url)
-  values (
-    new.id,
-    new.email,
-    coalesce(new.raw_user_meta_data ->> 'full_name', new.raw_user_meta_data ->> 'name'),
-    new.raw_user_meta_data ->> 'avatar_url'
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, email, full_name, avatar_url)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    NEW.raw_user_meta_data->>'full_name',
+    NEW.raw_user_meta_data->>'avatar_url'
   )
-  on conflict (id) do update set
-    email = excluded.email,
-    full_name = coalesce(excluded.full_name, profiles.full_name),
-    avatar_url = coalesce(excluded.avatar_url, profiles.avatar_url);
-  return new;
-end;
-$$;
+  ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
 
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-after insert on auth.users
-for each row execute function public.handle_new_user();
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
-alter table public.profiles enable row level security;
-alter table public.analyses enable row level security;
-alter table public.reports enable row level security;
-alter table public.subscriptions enable row level security;
-alter table public.usage_logs enable row level security;
+CREATE TABLE IF NOT EXISTS analyses (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  content TEXT NOT NULL,
+  url TEXT,
+  score INTEGER CHECK (score >= 0 AND score <= 100),
+  results JSONB NOT NULL,
+  tokens_used INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
-drop policy if exists "Users can view their profile" on public.profiles;
-create policy "Users can view their profile" on public.profiles
-for select using (auth.uid() = id);
-drop policy if exists "Users can update their profile" on public.profiles;
-create policy "Users can update their profile" on public.profiles
-for update using (auth.uid() = id) with check (auth.uid() = id);
+CREATE INDEX IF NOT EXISTS idx_analyses_user ON analyses(user_id, created_at DESC);
 
-drop policy if exists "Users can view their analyses" on public.analyses;
-create policy "Users can view their analyses" on public.analyses
-for select using (auth.uid() = user_id);
-drop policy if exists "Users can create their analyses" on public.analyses;
-create policy "Users can create their analyses" on public.analyses
-for insert with check (auth.uid() = user_id);
-drop policy if exists "Users can delete their analyses" on public.analyses;
-create policy "Users can delete their analyses" on public.analyses
-for delete using (auth.uid() = user_id);
+CREATE TABLE IF NOT EXISTS subscriptions (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  stripe_subscription_id TEXT UNIQUE NOT NULL,
+  stripe_price_id TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  status TEXT NOT NULL,
+  current_period_start TIMESTAMPTZ,
+  current_period_end TIMESTAMPTZ,
+  cancel_at_period_end BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
-drop policy if exists "Users can view their reports" on public.reports;
-create policy "Users can view their reports" on public.reports
-for select using (auth.uid() = user_id);
-drop policy if exists "Users can create their reports" on public.reports;
-create policy "Users can create their reports" on public.reports
-for insert with check (auth.uid() = user_id);
-drop policy if exists "Users can delete their reports" on public.reports;
-create policy "Users can delete their reports" on public.reports
-for delete using (auth.uid() = user_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user ON subscriptions(user_id);
+CREATE INDEX IF NOT EXISTS idx_subscriptions_stripe ON subscriptions(stripe_subscription_id);
 
-drop policy if exists "Users can view their subscriptions" on public.subscriptions;
-create policy "Users can view their subscriptions" on public.subscriptions
-for select using (auth.uid() = user_id);
+CREATE TABLE IF NOT EXISTS usage_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  action TEXT NOT NULL,
+  tokens_used INTEGER DEFAULT 0,
+  cost_usd NUMERIC(10,6) DEFAULT 0,
+  metadata JSONB,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
 
-drop policy if exists "Users can view their usage logs" on public.usage_logs;
-create policy "Users can view their usage logs" on public.usage_logs
-for select using (auth.uid() = user_id);
-drop policy if exists "Users can create their usage logs" on public.usage_logs;
-create policy "Users can create their usage logs" on public.usage_logs
-for insert with check (auth.uid() = user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_logs(user_id, created_at DESC);
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE analyses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE usage_logs ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Users view own profile" ON profiles;
+CREATE POLICY "Users view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
+DROP POLICY IF EXISTS "Users update own profile" ON profiles;
+CREATE POLICY "Users update own profile" ON profiles FOR UPDATE USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+DROP POLICY IF EXISTS "Users manage own analyses" ON analyses;
+CREATE POLICY "Users manage own analyses" ON analyses FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users view own subscriptions" ON subscriptions;
+CREATE POLICY "Users view own subscriptions" ON subscriptions FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users view own usage" ON usage_logs;
+CREATE POLICY "Users view own usage" ON usage_logs FOR SELECT USING (auth.uid() = user_id);
+
+CREATE OR REPLACE FUNCTION update_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS profiles_updated_at ON profiles;
+CREATE TRIGGER profiles_updated_at BEFORE UPDATE ON profiles
+FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+DROP TRIGGER IF EXISTS subscriptions_updated_at ON subscriptions;
+CREATE TRIGGER subscriptions_updated_at BEFORE UPDATE ON subscriptions
+FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- Atomic credit operations prevent concurrent requests from overspending.
+CREATE OR REPLACE FUNCTION decrement_profile_credits(p_user_id UUID, p_amount INTEGER)
+RETURNS INTEGER AS $$
+DECLARE remaining INTEGER;
+BEGIN
+  IF p_amount <= 0 THEN RAISE EXCEPTION 'Credit amount must be positive'; END IF;
+  UPDATE profiles
+  SET credits = credits - p_amount
+  WHERE id = p_user_id AND credits >= p_amount
+  RETURNING credits INTO remaining;
+  RETURN COALESCE(remaining, -1);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;
+
+CREATE OR REPLACE FUNCTION add_profile_credits(p_user_id UUID, p_amount INTEGER)
+RETURNS INTEGER AS $$
+DECLARE remaining INTEGER;
+BEGIN
+  IF p_amount <= 0 THEN RAISE EXCEPTION 'Credit amount must be positive'; END IF;
+  UPDATE profiles
+  SET credits = credits + p_amount
+  WHERE id = p_user_id
+  RETURNING credits INTO remaining;
+  RETURN COALESCE(remaining, -1);
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public;

@@ -1,57 +1,60 @@
 import { z } from "zod";
+import { getAuthenticatedUser } from "@/lib/auth";
+import { checkCredits, deductCredits } from "@/lib/credits";
+import { rateLimit } from "@/lib/rate-limit";
 import { analyzeArticle } from "@/lib/seo-agent";
-import { createServerSupabaseClient } from "@/lib/supabase";
+import { createAdminClient } from "@/lib/supabase/admin";
+import { jsonError } from "@/lib/utils";
 
-export const runtime = "nodejs";
-
-const requestSchema = z.object({
-  content: z.string().trim().min(1, "Content is required").max(40_000, "Content is too long"),
-  url: z.string().url("URL must be valid").optional(),
+const analyzeSchema = z.object({
+  content: z.string().trim().min(100).max(40_000),
+  url: z.string().url().optional(),
 });
 
-const WINDOW_MS = 60_000;
-const MAX_REQUESTS = 5;
-const requestLog = new Map<string, number[]>();
-
-function isRateLimited(key: string): boolean {
-  const now = Date.now();
-  const timestamps = (requestLog.get(key) ?? []).filter((time) => now - time < WINDOW_MS);
-  if (timestamps.length >= MAX_REQUESTS) {
-    requestLog.set(key, timestamps);
-    return true;
-  }
-  timestamps.push(now);
-  requestLog.set(key, timestamps);
-  return false;
-}
-
-export async function POST(request: Request): Promise<Response> {
+export async function POST(request: Request) {
   try {
-    const supabase = await createServerSupabaseClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    if (authError || !user) return Response.json({ error: "Authentication required" }, { status: 401 });
-    if (isRateLimited(user.id)) {
-      return Response.json({ error: "Rate limit exceeded. Try again later." }, { status: 429, headers: { "Retry-After": "60" } });
+    const parsed = analyzeSchema.safeParse(await request.json());
+    if (!parsed.success) return jsonError("Content must be between 100 and 40,000 characters", 400, "VALIDATION_ERROR");
+
+    const { user } = await getAuthenticatedUser();
+    if (!user) return jsonError("Authentication required", 401, "UNAUTHORIZED");
+
+    const limit = rateLimit(user.id, 10, 60_000);
+    if (!limit.allowed) {
+      return new Response(JSON.stringify({ error: "Too many requests", code: "RATE_LIMITED" }), {
+        status: 429,
+        headers: { "Content-Type": "application/json", "Retry-After": String(Math.ceil((limit.resetAt - Date.now()) / 1000)) },
+      });
     }
 
-    let body: unknown;
-    try { body = await request.json(); } catch { return Response.json({ error: "Request body must be valid JSON" }, { status: 400 }); }
-    const parsed = requestSchema.safeParse(body);
-    if (!parsed.success) return Response.json({ error: "Invalid request", details: parsed.error.flatten() }, { status: 400 });
+    const credits = await checkCredits(user.id);
+    if (credits < 1) return jsonError("No credits remaining", 402, "INSUFFICIENT_CREDITS");
 
     const result = await analyzeArticle(parsed.data.content);
-    const { error: insertError } = await supabase.from("analyses").insert({
+    const admin = createAdminClient();
+    const { data: analysis, error: insertError } = await admin.from("analyses").insert({
       user_id: user.id,
       content: parsed.data.content,
-      url: parsed.data.url ?? null,
+      url: parsed.data.url || null,
       score: result.score,
       results: result,
-    });
-    if (insertError) console.error("Failed to save SEO analysis", insertError);
+      tokens_used: 0,
+    }).select("id, score, results, created_at").single();
+    if (insertError) throw new Error(`Unable to save analysis: ${insertError.message}`);
 
-    return Response.json({ data: result }, { status: 200 });
+    const creditsLeft = await deductCredits(user.id);
+    const { error: usageError } = await admin.from("usage_logs").insert({
+      user_id: user.id,
+      action: "article_analysis",
+      tokens_used: 0,
+      cost_usd: 0,
+      metadata: { analysis_id: analysis.id },
+    });
+    if (usageError) throw new Error(`Unable to log usage: ${usageError.message}`);
+
+    return Response.json({ data: { analysis, credits_left: creditsLeft } });
   } catch (error) {
-    console.error("SEO analysis route failed", error);
-    return Response.json({ error: "Unable to analyze content" }, { status: 500 });
+    console.error("Article analysis failed:", error);
+    return jsonError(error instanceof Error ? error.message : "Analysis failed", 500, "ANALYSIS_FAILED");
   }
 }

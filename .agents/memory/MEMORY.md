@@ -1,0 +1,1 @@
+- [Next.js package firewall](nextjs-package-firewall.md) — this environment blocks the imported Next 14 package; use the latest safe Next release and account for its middleware migration warning.

@@ -1,30 +1,29 @@
-# SEOMaster Pro
+# SEOMaster Pro Backend
 
-SEOMaster Pro is an AI-powered SEO analysis platform built with Next.js 14, TypeScript, Tailwind CSS, Supabase, OpenAI, NextAuth, and Stripe.
+Backend-only Next.js App Router API for Supabase authentication, AI article analysis, credits, usage tracking, and Stripe billing. There are no landing pages or dashboard components.
 
-## Local setup
+## Setup
+
+1. Install dependencies with `npm install`.
+2. Run `supabase/schema.sql` in the Supabase SQL Editor.
+3. Add the variables in `.env.example` to Replit Secrets. Do not commit service-role, OpenAI, or Stripe secrets.
+4. Configure a Stripe webhook for `/api/stripe/webhook` and subscribe it to checkout, subscription, and invoice payment events.
+5. Start the API with `npm run dev`.
+
+## Routes
+
+- `POST /api/auth/signup`, `POST /api/auth/signin`, `POST /api/auth/signout`
+- `GET /api/auth/callback`
+- `GET /api/user/me`, `GET /api/user/usage`
+- `POST /api/analyze`
+- `POST /api/stripe/checkout`, `POST /api/stripe/portal`
+- `POST /api/stripe/webhook`
+
+All JSON responses use `{ data: ... }` on success and `{ error, code? }` on failure. Protected routes require the Supabase session cookie.
+
+## Checks
 
 ```bash
-npm install
-cp .env.local.example .env.local
-npm run dev
-```
-
-Open http://localhost:3000.
-
-## Database
-
-Run `supabase/schema.sql` in the Supabase SQL editor, then configure the Supabase URL and keys in `.env.local`.
-
-## Environment variables
-
-See `.env.local.example` for Supabase, OpenAI, Stripe, NextAuth, OAuth, and email provider variables. Never commit `.env.local` or service-role credentials.
-
-## Production build
-
-```bash
+npm run typecheck
 npm run build
-npm start
 ```
-
-Deploy through Vercel after adding the same environment variables to the project settings. Configure the Stripe webhook endpoint at `/api/stripe/webhook`.
