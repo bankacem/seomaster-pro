@@ -1,0 +1,8 @@
+{
+  "name": "seomaster-pro",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {"dev":"next dev","build":"next build","start":"next start","lint":"next lint","db:push":"supabase db push","db:types":"supabase gen types typescript --local > types/database.ts"},
+  "dependencies": {"@auth/supabase-adapter":"latest","@supabase/ssr":"latest","@supabase/supabase-js":"latest","class-variance-authority":"latest","clsx":"latest","lucide-react":"latest","next":"14.2.30","next-auth":"4.24.11","openai":"latest","react":"18.3.1","react-dom":"18.3.1","stripe":"latest","tailwind-merge":"latest","zod":"latest"},
+  "devDependencies": {"@types/node":"latest","@types/react":"latest","@types/react-dom":"latest","autoprefixer":"latest","postcss":"latest","tailwindcss":"latest","typescript":"latest"}
+}

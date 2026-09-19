@@ -1,0 +1,2 @@
+import Link from "next/link";
+export default function ReportsPage() { return <main className="mx-auto max-w-7xl px-6 py-10 text-white"><h1 className="text-3xl font-bold">Reports</h1><p className="mt-2 text-slate-400">Create and manage professional SEO reports from your analyses.</p><Link href="/dashboard/analyze" className="mt-8 inline-block rounded-lg bg-blue-600 px-4 py-3 font-semibold">Create a report</Link></main>; }
