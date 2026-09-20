@@ -1,80 +1,103 @@
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import type { Issue, SEOAnalysis } from "@/lib/types";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
 import { sleep } from "@/lib/utils";
+import type { Issue, SEOAnalysis } from "@/lib/types";
 
-const MAX_CONTENT_LENGTH = 40_000;
-const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_CONTENT_LENGTH = 15_000;
 
-const analysisSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["score", "title", "metaDescription", "keywords", "suggestions", "readability", "wordCount", "issues"],
-  properties: {
-    score: { type: "integer", minimum: 0, maximum: 100 },
-    title: { type: "string" },
-    metaDescription: { type: "string" },
-    keywords: { type: "array", items: { type: "string" } },
-    suggestions: { type: "array", items: { type: "string" } },
-    readability: { type: "integer", minimum: 0, maximum: 100 },
-    wordCount: { type: "integer", minimum: 0 },
-    issues: {
-      type: "array",
-      items: { type: "object", additionalProperties: false, required: ["type", "message"], properties: { type: { type: "string" }, message: { type: "string" } } },
-    },
-  },
-} as const;
+const seoAnalysisSchemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "score": number (0-100, overall SEO score),
+  "title": "string — improved SEO title suggestion (50-60 chars)",
+  "metaDescription": "string — SEO meta description (140-160 chars)",
+  "keywords": ["array of up to 10 primary keywords extracted from the article"],
+  "suggestions": ["array of up to 5 actionable improvement suggestions"],
+  "readability": number (0-100, Flesch-like readability score),
+  "wordCount": number (approximate word count of the article),
+  "issues": [
+    {
+      "type": "string — short issue identifier (e.g. 'title-length', 'keyword-density')",
+      "message": "string — human-readable description of the issue",
+      "severity": "low" | "medium" | "high"
+    }
+  ]
+}
+Return ONLY valid JSON. No markdown, no code fences, no surrounding prose.`;
+
+interface AISEOAnalysis {
+  score: number;
+  title: string;
+  metaDescription: string;
+  keywords: string[];
+  suggestions: string[];
+  readability: number;
+  wordCount: number;
+  issues: Array<{ type: string; message: string; severity?: "low" | "medium" | "high" }>;
+}
 
 export async function analyzeArticle(content: string): Promise<SEOAnalysis> {
   const article = content.trim().slice(0, MAX_CONTENT_LENGTH);
-  const client = getOpenAIClient();
-  const prompt = `Analyze this article for search intent, topical coverage, on-page SEO, structure, and readability. Return only structured JSON. Article:\n\n${article}`;
+  if (article.length < 100) throw new Error("Article too short — minimum 100 characters required.");
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "seo_analysis", strict: true, schema: analysisSchema } },
-          messages: [
-            {
-              role: "system",
-              content: "You are a senior technical SEO strategist. Recommendations must be actionable and must not claim guaranteed rankings or invent search data.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: REQUEST_TIMEOUT_MS },
-      );
+  const systemPrompt = `You are a senior technical SEO strategist with 15+ years of experience. Analyze articles for search intent, topical coverage, on-page SEO, structure, and readability. Your analysis must be specific, actionable, and grounded in current SEO best practices (Google Search Essentials, E-E-A-T, Core Web Vitals). Never invent metrics — only return values you can justify from the article content. ${seoAnalysisSchemaDescription}`;
 
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      return JSON.parse(contentJson) as SEOAnalysis;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
-    }
-  }
+  const userPrompt = `Analyze this article for SEO and return the JSON object described above:
 
-  throw new Error("SEO analysis failed");
+ARTICLE:
+"""
+${article}
+"""`;
+
+  const { data } = await callAIWithRetry(() =>
+    callAIJson<AISEOAnalysis>(userPrompt, systemPrompt, { temperature: 0.3 })
+  );
+
+  // Validate and coerce the response into our app's type
+  const score = Math.max(0, Math.min(100, Math.round(Number(data.score) || 0)));
+  const readability = Math.max(0, Math.min(100, Math.round(Number(data.readability) || 0)));
+  const wordCount = Math.max(0, Math.round(Number(data.wordCount) || 0));
+
+  const keywords = Array.isArray(data.keywords)
+    ? data.keywords.filter((k): k is string => typeof k === "string" && k.trim().length > 0).slice(0, 10)
+    : [];
+
+  const suggestions = Array.isArray(data.suggestions)
+    ? data.suggestions.filter((s): s is string => typeof s === "string" && s.trim().length > 0).slice(0, 5)
+    : [];
+
+  const issues: Issue[] = Array.isArray(data.issues)
+    ? data.issues
+        .filter((i) => i && typeof i.type === "string" && typeof i.message === "string")
+        .map((i) => ({
+          type: String(i.type),
+          message: String(i.message),
+          ...(i.severity ? { severity: i.severity } : {}),
+        }))
+        .slice(0, 20)
+    : [];
+
+  return {
+    score,
+    title: String(data.title || "").slice(0, 200),
+    metaDescription: String(data.metaDescription || "").slice(0, 300),
+    keywords,
+    suggestions,
+    readability,
+    wordCount,
+    issues,
+  };
 }
 
-export async function generateKeywords(topic: string) {
-  const client = getOpenAIClient();
-  const completion = await client.chat.completions.create(
-    {
-      model: OPENAI_MODEL,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "Return JSON with a keywords array of 10 strings. Do not claim access to proprietary keyword data." },
-        { role: "user", content: `Generate SEO keyword ideas for: ${topic.trim()}` },
-      ],
-    },
-    { timeout: REQUEST_TIMEOUT_MS },
-  );
-  const parsed = JSON.parse(completion.choices[0]?.message?.content || "{}") as { keywords?: unknown };
-  return Array.isArray(parsed.keywords) ? parsed.keywords.filter((keyword): keyword is string => typeof keyword === "string").slice(0, 10) : [];
+export async function generateKeywords(topic: string, count = 10): Promise<string[]> {
+  const cleanTopic = topic.trim().slice(0, 200);
+  if (!cleanTopic) throw new Error("Topic required");
+
+  const systemPrompt = `You are a keyword research specialist. Generate ${count} high-intent SEO keywords for the given topic. Return ONLY a JSON object with a "keywords" string array. Each keyword should be a real-world phrase people would type into Google. Mix short-tail and long-tail keywords.`;
+  const userPrompt = `Generate ${count} SEO keywords for: "${cleanTopic}". Return JSON: {"keywords": ["keyword1", "keyword2", ...]}`;
+
+  const { data } = await callAIJson<{ keywords?: unknown }>(userPrompt, systemPrompt, { temperature: 0.5 });
+  return Array.isArray(data.keywords)
+    ? data.keywords.filter((k): k is string => typeof k === "string" && k.trim().length > 0).slice(0, count)
+    : [];
 }
 
 export type { Issue };

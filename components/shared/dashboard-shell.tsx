@@ -20,6 +20,9 @@ import {
   Zap,
   CreditCard,
   CircleHelp,
+  PenLine,
+  Target,
+  Wand2,
 } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
@@ -48,6 +51,8 @@ const NAV_GROUPS = [
     label: "Research",
     items: [
       { href: "/dashboard/keywords", label: "Keyword Research", icon: Search },
+      { href: "/dashboard/keyword-difficulty", label: "Keyword Difficulty", icon: Target },
+      { href: "/dashboard/serp-analysis", label: "SERP Analysis", icon: Search },
       { href: "/dashboard/competitors", label: "Competitors", icon: Users },
       { href: "/dashboard/domain", label: "Domain Overview", icon: Globe },
     ],
@@ -61,8 +66,10 @@ const NAV_GROUPS = [
     ],
   },
   {
-    label: "Optimize",
+    label: "Create & Optimize",
     items: [
+      { href: "/dashboard/content-writer", label: "AI Content Writer", icon: PenLine },
+      { href: "/dashboard/content-optimizer", label: "Content Optimizer", icon: Wand2 },
       { href: "/dashboard/analyzer", label: "Content Analyzer", icon: FileText },
       { href: "/dashboard/onpage", label: "On-Page SEO", icon: CheckSquare },
     ],

@@ -60,6 +60,7 @@ export interface SiteAudit {
 export interface Issue {
   type: string;
   message: string;
+  severity?: "low" | "medium" | "high";
 }
 
 export interface SEOAnalysis {

@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -45,45 +45,6 @@ interface BacklinkProfile {
   gained_last_30d: number;
 }
 
-const backlinkResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "domain",
-    "total_backlinks",
-    "referring_domains",
-    "domain_authority",
-    "top_backlinks",
-    "toxic_backlinks",
-    "lost_last_30d",
-    "gained_last_30d",
-  ],
-  properties: {
-    domain: { type: "string" },
-    total_backlinks: { type: "integer", minimum: 0 },
-    referring_domains: { type: "integer", minimum: 0 },
-    domain_authority: { type: "integer", minimum: 0, maximum: 100 },
-    top_backlinks: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["source_domain", "authority", "anchor_text", "link_type", "first_seen"],
-        properties: {
-          source_domain: { type: "string" },
-          authority: { type: "integer", minimum: 0, maximum: 100 },
-          anchor_text: { type: "string" },
-          link_type: { type: "string", enum: ["dofollow", "nofollow"] },
-          first_seen: { type: "string" },
-        },
-      },
-    },
-    toxic_backlinks: { type: "integer", minimum: 0 },
-    lost_last_30d: { type: "integer", minimum: 0 },
-    gained_last_30d: { type: "integer", minimum: 0 },
-  },
-} as const;
-
 function normalizeDomain(value: string) {
   const candidate = value.includes("://") ? value : `https://${value}`;
   try {
@@ -113,40 +74,39 @@ function seededBaseline(domain: string) {
 async function generateBacklinkProfile(rawDomain: string): Promise<BacklinkProfile> {
   const domain = normalizeDomain(rawDomain);
   const seed = seededBaseline(domain);
-  const client = getOpenAIClient();
-  const prompt = `Generate a plausible AI-estimated backlink profile for the domain "${domain}". Use these baseline numbers as a guide (you may adjust by ±10%%): total_backlinks ~${seed.totalBacklinks}, referring_domains ~${seed.referringDomains}, domain_authority ~${seed.domainAuthority}, toxic_backlinks ~${seed.toxic}, lost_last_30d ~${seed.lost}, gained_last_30d ~${seed.gained}. Provide 5 plausible top backlinks. Do NOT claim these are exact figures from proprietary indexes.`;
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "backlink_profile", strict: true, schema: backlinkResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior off-page SEO analyst. Return JSON only. Numbers must be plausible estimates; do not claim exact data.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
-
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as BacklinkProfile;
-      parsed.domain = domain;
-      parsed.top_backlinks = (parsed.top_backlinks || []).slice(0, 5);
-      return parsed;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "domain": "string",
+  "total_backlinks": "integer >=0",
+  "referring_domains": "integer >=0",
+  "domain_authority": "integer 0-100",
+  "top_backlinks": [
+    {
+      "source_domain": "string",
+      "authority": "integer 0-100",
+      "anchor_text": "string",
+      "link_type": "dofollow" | "nofollow",
+      "first_seen": "string (ISO date)"
     }
-  }
-  throw new Error("Backlink analysis failed");
+  ],
+  "toxic_backlinks": "integer >=0",
+  "lost_last_30d": "integer >=0",
+  "gained_last_30d": "integer >=0"
+}
+Provide up to 5 top_backlinks. Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
+
+  const systemPrompt = `You are a senior off-page SEO analyst. Return JSON only. Numbers must be plausible estimates; do not claim exact data. ${schemaDescription}`;
+
+  const userPrompt = `Generate a plausible AI-estimated backlink profile for the domain "${domain}". Use these baseline numbers as a guide (you may adjust by ±10%): total_backlinks ~${seed.totalBacklinks}, referring_domains ~${seed.referringDomains}, domain_authority ~${seed.domainAuthority}, toxic_backlinks ~${seed.toxic}, lost_last_30d ~${seed.lost}, gained_last_30d ~${seed.gained}. Provide 5 plausible top backlinks. Do NOT claim these are exact figures from proprietary indexes.`;
+
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<BacklinkProfile>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
+
+  parsed.domain = domain;
+  parsed.top_backlinks = (parsed.top_backlinks || []).slice(0, 5);
+  return parsed;
 }
 
 export async function POST(request: Request) {

@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -48,54 +48,6 @@ interface DomainOverview {
   summary: string;
 }
 
-const domainResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: [
-    "domain",
-    "estimated_organic_traffic",
-    "estimated_keywords_count",
-    "estimated_backlinks_count",
-    "domain_authority",
-    "top_keywords",
-    "top_pages",
-    "summary",
-  ],
-  properties: {
-    domain: { type: "string" },
-    estimated_organic_traffic: { type: "integer", minimum: 0 },
-    estimated_keywords_count: { type: "integer", minimum: 0 },
-    estimated_backlinks_count: { type: "integer", minimum: 0 },
-    domain_authority: { type: "integer", minimum: 0, maximum: 100 },
-    top_keywords: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["keyword", "position", "volume"],
-        properties: {
-          keyword: { type: "string" },
-          position: { type: "integer", minimum: 1, maximum: 100 },
-          volume: { type: "integer", minimum: 0 },
-        },
-      },
-    },
-    top_pages: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["url", "traffic_estimate"],
-        properties: {
-          url: { type: "string" },
-          traffic_estimate: { type: "integer", minimum: 0 },
-        },
-      },
-    },
-    summary: { type: "string" },
-  },
-} as const;
-
 function normalizeDomain(value: string) {
   const candidate = value.includes("://") ? value : `https://${value}`;
   try {
@@ -122,41 +74,36 @@ function seededOverview(domain: string) {
 async function generateDomainOverview(rawDomain: string): Promise<DomainOverview> {
   const domain = normalizeDomain(rawDomain);
   const seed = seededOverview(domain);
-  const client = getOpenAIClient();
-  const prompt = `Generate a plausible AI-estimated domain overview for "${domain}". Use these baseline numbers as a guide (you may adjust by ±10%%): estimated_organic_traffic ~${seed.organicTraffic}, estimated_keywords_count ~${seed.keywordsCount}, estimated_backlinks_count ~${seed.backlinksCount}, domain_authority ~${seed.domainAuthority}. Provide up to 5 top keywords (each with position 1-100 and a volume), up to 5 top pages (a URL on the domain with a traffic_estimate), and a 1-2 sentence summary. Do NOT claim these are exact figures from proprietary indexes.`;
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "domain_overview", strict: true, schema: domainResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior SEO strategist. Return JSON only. All numbers are plausible AI estimates, not exact figures.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "domain": "string",
+  "estimated_organic_traffic": "integer >=0",
+  "estimated_keywords_count": "integer >=0",
+  "estimated_backlinks_count": "integer >=0",
+  "domain_authority": "integer 0-100",
+  "top_keywords": [
+    { "keyword": "string", "position": "integer 1-100", "volume": "integer >=0" }
+  ],
+  "top_pages": [
+    { "url": "string", "traffic_estimate": "integer >=0" }
+  ],
+  "summary": "string"
+}
+Provide up to 5 top_keywords and up to 5 top_pages. Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
 
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as DomainOverview;
-      parsed.domain = domain;
-      parsed.top_keywords = (parsed.top_keywords || []).slice(0, 5);
-      parsed.top_pages = (parsed.top_pages || []).slice(0, 5);
-      return parsed;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
-    }
-  }
-  throw new Error("Domain overview failed");
+  const systemPrompt = `You are a senior SEO strategist. Return JSON only. All numbers are plausible AI estimates, not exact figures. ${schemaDescription}`;
+
+  const userPrompt = `Generate a plausible AI-estimated domain overview for "${domain}". Use these baseline numbers as a guide (you may adjust by ±10%): estimated_organic_traffic ~${seed.organicTraffic}, estimated_keywords_count ~${seed.keywordsCount}, estimated_backlinks_count ~${seed.backlinksCount}, domain_authority ~${seed.domainAuthority}. Provide up to 5 top keywords (each with position 1-100 and a volume), up to 5 top pages (a URL on the domain with a traffic_estimate), and a 1-2 sentence summary. Do NOT claim these are exact figures from proprietary indexes.`;
+
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<DomainOverview>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
+
+  parsed.domain = domain;
+  parsed.top_keywords = (parsed.top_keywords || []).slice(0, 5);
+  parsed.top_pages = (parsed.top_pages || []).slice(0, 5);
+  return parsed;
 }
 
 export async function POST(request: Request) {

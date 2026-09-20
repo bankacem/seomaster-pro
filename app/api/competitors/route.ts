@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -41,33 +41,6 @@ interface CompetitorAnalysis {
   summary: string;
 }
 
-const competitorResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["domain", "competitors", "shared_keywords", "gaps", "summary"],
-  properties: {
-    domain: { type: "string" },
-    competitors: {
-      type: "array",
-      maxItems: 5,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["domain", "traffic_estimate", "keywords_overlap", "competition_level"],
-        properties: {
-          domain: { type: "string" },
-          traffic_estimate: { type: "integer", minimum: 0 },
-          keywords_overlap: { type: "integer", minimum: 0 },
-          competition_level: { type: "string", enum: ["low", "medium", "high"] },
-        },
-      },
-    },
-    shared_keywords: { type: "array", maxItems: 10, items: { type: "string" } },
-    gaps: { type: "array", items: { type: "string" } },
-    summary: { type: "string" },
-  },
-} as const;
-
 function normalizeDomain(value: string) {
   const candidate = value.includes("://") ? value : `https://${value}`;
   try {
@@ -79,41 +52,36 @@ function normalizeDomain(value: string) {
 
 async function generateCompetitorAnalysis(rawDomain: string): Promise<CompetitorAnalysis> {
   const domain = normalizeDomain(rawDomain);
-  const client = getOpenAIClient();
-  const prompt = `Perform an AI-estimated competitive analysis for the domain "${domain}". List up to 5 plausible competitor domains with traffic estimates, keyword overlap counts, and competition level. Provide up to 10 shared keywords and a list of keyword gaps (competitor keywords the target doesn't rank for). End with a short 1-2 sentence summary. Do not claim exact proprietary data; estimates only.`;
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "competitor_analysis", strict: true, schema: competitorResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior competitive SEO analyst. Return JSON only. Numbers are plausible AI estimates, not exact figures from proprietary indexes.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
-
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as CompetitorAnalysis;
-      parsed.domain = domain;
-      parsed.competitors = (parsed.competitors || []).slice(0, 5);
-      parsed.shared_keywords = (parsed.shared_keywords || []).slice(0, 10);
-      return parsed;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "domain": "string",
+  "competitors": [
+    {
+      "domain": "string",
+      "traffic_estimate": "integer >=0",
+      "keywords_overlap": "integer >=0",
+      "competition_level": "low" | "medium" | "high"
     }
-  }
-  throw new Error("Competitor analysis failed");
+  ],
+  "shared_keywords": ["array of up to 10 strings"],
+  "gaps": ["array of strings"],
+  "summary": "string, 1-2 sentences"
+}
+Provide up to 5 competitors. Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
+
+  const systemPrompt = `You are a senior competitive SEO analyst. Return JSON only. Numbers are plausible AI estimates, not exact figures from proprietary indexes. ${schemaDescription}`;
+
+  const userPrompt = `Perform an AI-estimated competitive analysis for the domain "${domain}". List up to 5 plausible competitor domains with traffic estimates, keyword overlap counts, and competition level. Provide up to 10 shared keywords and a list of keyword gaps (competitor keywords the target doesn't rank for). End with a short 1-2 sentence summary. Do not claim exact proprietary data; estimates only.`;
+
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<CompetitorAnalysis>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
+
+  parsed.domain = domain;
+  parsed.competitors = (parsed.competitors || []).slice(0, 5);
+  parsed.shared_keywords = (parsed.shared_keywords || []).slice(0, 10);
+  return parsed;
 }
 
 export async function POST(request: Request) {

@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -42,32 +42,6 @@ interface PositionsResult {
   keywords: PositionRow[];
 }
 
-const positionsResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["domain", "keywords"],
-  properties: {
-    domain: { type: "string" },
-    keywords: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["keyword", "position", "url", "previous_position", "change", "search_volume", "difficulty"],
-        properties: {
-          keyword: { type: "string" },
-          position: { type: "integer", minimum: 1, maximum: 100 },
-          url: { type: "string" },
-          previous_position: { type: "integer", minimum: 1, maximum: 100 },
-          change: { type: "integer", minimum: -100, maximum: 100 },
-          search_volume: { type: "integer", minimum: 0 },
-          difficulty: { type: "integer", minimum: 0, maximum: 100 },
-        },
-      },
-    },
-  },
-} as const;
-
 function normalizeDomain(value: string) {
   const candidate = value.includes("://") ? value : `https://${value}`;
   try {
@@ -96,58 +70,52 @@ async function generatePositions(domain: string, keywords: string[]): Promise<Po
     return { keyword, position, previous_position: previousPosition, change: previousPosition - position };
   });
 
-  const client = getOpenAIClient();
-  const prompt = `For the domain "${normalizedDomain}", generate plausible simulated search ranking data for each keyword below. For every keyword provide: position (1-100), url (a plausible URL on the domain), previous_position, change (previous - current), search_volume (monthly, plausible), difficulty (0-100). Use the suggested baselines below as starting points, you may adjust by small amounts.\n\nBaselines:\n${baselines
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "domain": "string",
+  "keywords": [
+    {
+      "keyword": "string",
+      "position": "integer 1-100",
+      "url": "string — a plausible URL on the domain",
+      "previous_position": "integer 1-100",
+      "change": "integer -100 to 100 (previous - current)",
+      "search_volume": "integer >=0",
+      "difficulty": "integer 0-100"
+    }
+  ]
+}
+Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
+
+  const systemPrompt = `You are a senior SEO analyst producing a simulated ranking report. Return JSON only. Numbers are plausible estimates, not real search-engine data. ${schemaDescription}`;
+
+  const userPrompt = `For the domain "${normalizedDomain}", generate plausible simulated search ranking data for each keyword below. For every keyword provide: position (1-100), url (a plausible URL on the domain), previous_position, change (previous - current), search_volume (monthly, plausible), difficulty (0-100). Use the suggested baselines below as starting points, you may adjust by small amounts.\n\nBaselines:\n${baselines
     .map((b) => `- ${b.keyword}: ~position ${b.position}, previous ~${b.previous_position}`)
     .join("\n")}\n\nReturn JSON only. Do not claim these are real search engine results.`;
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "position_tracking", strict: true, schema: positionsResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior SEO analyst producing a simulated ranking report. Return JSON only. Numbers are plausible estimates, not real search-engine data.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<PositionsResult>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
 
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as PositionsResult;
-      parsed.domain = normalizedDomain;
-      // Merge AI output with the deterministic baseline so positions remain
-      // stable across calls even if the model varies slightly.
-      const aiRows = new Map((parsed.keywords || []).map((row) => [row.keyword.toLowerCase(), row]));
-      parsed.keywords = baselines.map((base) => {
-        const aiRow = aiRows.get(base.keyword.toLowerCase());
-        const position = aiRow?.position ?? base.position;
-        const previous = aiRow?.previous_position ?? base.previous_position;
-        return {
-          keyword: base.keyword,
-          position,
-          url: aiRow?.url || `https://${normalizedDomain}/`,
-          previous_position: previous,
-          change: previous - position,
-          search_volume: aiRow?.search_volume ?? (50 + (hashSeed(base.keyword) % 9_500)),
-          difficulty: aiRow?.difficulty ?? (10 + (hashSeed(base.keyword + "d") % 80)),
-        };
-      });
-      return parsed;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
-    }
-  }
-  throw new Error("Position tracking failed");
+  parsed.domain = normalizedDomain;
+  // Merge AI output with the deterministic baseline so positions remain
+  // stable across calls even if the model varies slightly.
+  const aiRows = new Map((parsed.keywords || []).map((row) => [row.keyword.toLowerCase(), row]));
+  parsed.keywords = baselines.map((base) => {
+    const aiRow = aiRows.get(base.keyword.toLowerCase());
+    const position = aiRow?.position ?? base.position;
+    const previous = aiRow?.previous_position ?? base.previous_position;
+    return {
+      keyword: base.keyword,
+      position,
+      url: aiRow?.url || `https://${normalizedDomain}/`,
+      previous_position: previous,
+      change: previous - position,
+      search_volume: aiRow?.search_volume ?? (50 + (hashSeed(base.keyword) % 9_500)),
+      difficulty: aiRow?.difficulty ?? (10 + (hashSeed(base.keyword + "d") % 80)),
+    };
+  });
+  return parsed;
 }
 
 export async function POST(request: Request) {

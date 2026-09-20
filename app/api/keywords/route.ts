@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -22,64 +22,32 @@ interface KeywordIdea {
   intent: "informational" | "commercial" | "transactional" | "navigational";
 }
 
-const keywordResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["keywords"],
-  properties: {
-    keywords: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["keyword", "search_volume", "difficulty", "cpc", "competition", "intent"],
-        properties: {
-          keyword: { type: "string" },
-          search_volume: { type: "integer", minimum: 0 },
-          difficulty: { type: "integer", minimum: 0, maximum: 100 },
-          cpc: { type: "number", minimum: 0 },
-          competition: { type: "string", enum: ["low", "medium", "high"] },
-          intent: { type: "string", enum: ["informational", "commercial", "transactional", "navigational"] },
-        },
-      },
-    },
-  },
-} as const;
-
 async function generateKeywordIdeas(topic: string): Promise<{ keywords: KeywordIdea[] }> {
-  const client = getOpenAIClient();
-  const prompt = `Generate 10 SEO keyword ideas for the topic below. Provide plausible estimated metrics (search volume = monthly searches, difficulty 0-100, cpc in USD, competition level, search intent). Do not claim these are exact figures from proprietary tools; they are AI estimates.\n\nTopic: ${topic}`;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "keyword_research", strict: true, schema: keywordResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior SEO strategist. Return JSON with a `keywords` array. Estimates must be realistic; do not invent exact proprietary data.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
-
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as { keywords: KeywordIdea[] };
-      if (!parsed.keywords || !Array.isArray(parsed.keywords)) throw new Error("Invalid keyword payload");
-      return { keywords: parsed.keywords.slice(0, 10) };
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "keywords": [
+    {
+      "keyword": "string — the keyword phrase",
+      "search_volume": "integer >=0 (estimated monthly searches)",
+      "difficulty": "integer 0-100 (higher = harder to rank)",
+      "cpc": "number >=0 (cost-per-click in USD)",
+      "competition": "low" | "medium" | "high",
+      "intent": "informational" | "commercial" | "transactional" | "navigational"
     }
-  }
-  throw new Error("Keyword research failed");
+  ]
+}
+Provide up to 10 keywords. Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
+
+  const systemPrompt = `You are a senior SEO strategist. Return JSON with a "keywords" array. Estimates must be realistic; do not invent exact proprietary data. ${schemaDescription}`;
+
+  const userPrompt = `Generate 10 SEO keyword ideas for the topic below. Provide plausible estimated metrics (search volume = monthly searches, difficulty 0-100, cpc in USD, competition level, search intent). Do not claim these are exact figures from proprietary tools; they are AI estimates.\n\nTopic: ${topic}`;
+
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<{ keywords: KeywordIdea[] }>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
+
+  if (!parsed.keywords || !Array.isArray(parsed.keywords)) throw new Error("Invalid keyword payload");
+  return { keywords: parsed.keywords.slice(0, 10) };
 }
 
 export async function POST(request: Request) {

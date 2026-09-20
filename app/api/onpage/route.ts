@@ -3,8 +3,8 @@ import { getAuthenticatedUser } from "@/lib/auth";
 import { checkCredits, deductCredits } from "@/lib/credits";
 import { rateLimit } from "@/lib/rate-limit";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { getOpenAIClient, OPENAI_MODEL } from "@/lib/openai";
-import { jsonError, sleep } from "@/lib/utils";
+import { callAIJson, callAIWithRetry } from "@/lib/ai";
+import { jsonError } from "@/lib/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -41,31 +41,6 @@ interface ExtractedPage {
   wordCount: number;
   content: string;
 }
-
-const onpageResultSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["score", "recommendations", "summary"],
-  properties: {
-    score: { type: "integer", minimum: 0, maximum: 100 },
-    recommendations: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["category", "priority", "title", "description", "how_to_fix"],
-        properties: {
-          category: { type: "string" },
-          priority: { type: "string", enum: ["high", "medium", "low"] },
-          title: { type: "string" },
-          description: { type: "string" },
-          how_to_fix: { type: "string" },
-        },
-      },
-    },
-    summary: { type: "string" },
-  },
-} as const;
 
 function normalizeUrl(value: string) {
   const parsed = new URL(value);
@@ -144,39 +119,32 @@ async function fetchPage(url: string): Promise<ExtractedPage> {
 }
 
 async function generateOnPageReport(page: ExtractedPage): Promise<OnPageReport> {
-  const client = getOpenAIClient();
-  const prompt = `Review this web page and return an on-page SEO analysis with an overall score (0-100), prioritized recommendations, and a short summary. Each recommendation must include category, priority (high/medium/low), title, description, and how_to_fix instructions.\n\nURL: ${page.url}\nTitle: ${page.title || "(missing)"}\nMeta description: ${page.metaDescription || "(missing)"}\nH1 count: ${page.h1.length}\nH1 samples: ${page.h1.slice(0, 3).join(" | ") || "(none)"}\nH2 count: ${page.h2.length}\nH2 samples: ${page.h2.slice(0, 5).join(" | ") || "(none)"}\nWord count: ${page.wordCount}\nVisible content excerpt:\n${page.content}`;
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const completion = await client.chat.completions.create(
-        {
-          model: OPENAI_MODEL,
-          temperature: 0.2,
-          response_format: { type: "json_schema", json_schema: { name: "onpage_report", strict: true, schema: onpageResultSchema } },
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a senior technical SEO auditor. Recommendations must be actionable and specific. Return JSON only.",
-            },
-            { role: "user", content: prompt },
-          ],
-        },
-        { timeout: 30_000 },
-      );
-
-      const contentJson = completion.choices[0]?.message?.content;
-      if (!contentJson) throw new Error("OpenAI returned an empty response");
-      const parsed = JSON.parse(contentJson) as OnPageReport;
-      if (!Array.isArray(parsed.recommendations)) throw new Error("Invalid on-page payload");
-      return parsed;
-    } catch (error) {
-      if (attempt === 2) throw error;
-      await sleep(500 * 2 ** attempt);
+  const schemaDescription = `Return a valid JSON object with this exact structure:
+{
+  "score": "integer 0-100",
+  "recommendations": [
+    {
+      "category": "string",
+      "priority": "high" | "medium" | "low",
+      "title": "string",
+      "description": "string",
+      "how_to_fix": "string"
     }
-  }
-  throw new Error("On-page analysis failed");
+  ],
+  "summary": "string"
+}
+Return ONLY valid JSON — no markdown, no code fences, no surrounding prose.`;
+
+  const systemPrompt = `You are a senior technical SEO auditor. Recommendations must be actionable and specific. Return JSON only. ${schemaDescription}`;
+
+  const userPrompt = `Review this web page and return an on-page SEO analysis with an overall score (0-100), prioritized recommendations, and a short summary. Each recommendation must include category, priority (high/medium/low), title, description, and how_to_fix instructions.\n\nURL: ${page.url}\nTitle: ${page.title || "(missing)"}\nMeta description: ${page.metaDescription || "(missing)"}\nH1 count: ${page.h1.length}\nH1 samples: ${page.h1.slice(0, 3).join(" | ") || "(none)"}\nH2 count: ${page.h2.length}\nH2 samples: ${page.h2.slice(0, 5).join(" | ") || "(none)"}\nWord count: ${page.wordCount}\nVisible content excerpt:\n${page.content}`;
+
+  const { data: parsed } = await callAIWithRetry(() =>
+    callAIJson<OnPageReport>(userPrompt, systemPrompt, { temperature: 0.2 })
+  );
+
+  if (!Array.isArray(parsed.recommendations)) throw new Error("Invalid on-page payload");
+  return parsed;
 }
 
 export async function POST(request: Request) {
