@@ -32,11 +32,11 @@ type Profile = {
   email: string;
   full_name: string | null;
   avatar_url: string | null;
-  plan: "free" | "pro" | "enterprise";
+  plan?: "free" | "pro" | "enterprise" | null;
   credits: number;
-  stripe_customer_id: string | null;
-  created_at: string;
-  updated_at: string;
+  stripe_customer_id?: string | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export function useAuth() {

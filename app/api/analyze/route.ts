@@ -32,6 +32,10 @@ export async function POST(request: Request) {
 
     const result = await analyzeArticle(parsed.data.content);
     const admin = createAdminClient();
+
+    // Try to save to DB — but don't fail the whole request if the table is missing.
+    // Some deployments haven't run schema-update.sql yet.
+    let savedAnalysis: { id: string; score: number; results: typeof result; created_at: string; content: string; url: string | null } | null = null;
     const { data: analysis, error: insertError } = await admin.from("analyses").insert({
       user_id: user.id,
       content: parsed.data.content,
@@ -40,19 +44,33 @@ export async function POST(request: Request) {
       results: result,
       tokens_used: 0,
     }).select("id, score, results, created_at, content, url").single();
-    if (insertError) throw new Error(`Unable to save analysis: ${insertError.message}`);
+    if (insertError) {
+      console.warn("Unable to save analysis (table may not exist):", insertError.message);
+      savedAnalysis = {
+        id: `tmp-${Date.now()}`,
+        score: result.score,
+        results: result,
+        created_at: new Date().toISOString(),
+        content: parsed.data.content,
+        url: parsed.data.url || null,
+      };
+    } else {
+      savedAnalysis = analysis;
+    }
 
     const creditsLeft = await deductCredits(user.id);
+
+    // Usage logging — best effort, don't fail
     const { error: usageError } = await admin.from("usage_logs").insert({
       user_id: user.id,
       action: "article_analysis",
       tokens_used: 0,
       cost_usd: 0,
-      metadata: { analysis_id: analysis.id },
+      metadata: { analysis_id: savedAnalysis?.id },
     });
-    if (usageError) throw new Error(`Unable to log usage: ${usageError.message}`);
+    if (usageError) console.warn("Unable to log usage:", usageError.message);
 
-    return Response.json({ data: { analysis, credits_left: creditsLeft } });
+    return Response.json({ data: { analysis: savedAnalysis, credits_left: creditsLeft } });
   } catch (error) {
     console.error("Article analysis failed:", error);
     return jsonError(error instanceof Error ? error.message : "Analysis failed", 500, "ANALYSIS_FAILED");

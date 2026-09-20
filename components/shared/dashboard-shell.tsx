@@ -23,6 +23,8 @@ import {
   PenLine,
   Target,
   Wand2,
+  Layers,
+  MapPin,
 } from "lucide-react";
 import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
@@ -55,6 +57,7 @@ const NAV_GROUPS = [
       { href: "/dashboard/serp-analysis", label: "SERP Analysis", icon: Search },
       { href: "/dashboard/competitors", label: "Competitors", icon: Users },
       { href: "/dashboard/domain", label: "Domain Overview", icon: Globe },
+      { href: "/dashboard/content-gap", label: "Content Gap", icon: Layers },
     ],
   },
   {
@@ -63,6 +66,15 @@ const NAV_GROUPS = [
       { href: "/dashboard/audit", label: "Site Audit", icon: Globe },
       { href: "/dashboard/positions", label: "Position Tracking", icon: TrendingUp },
       { href: "/dashboard/backlinks", label: "Backlink Analysis", icon: Link2 },
+      { href: "/dashboard/seo-report", label: "SEO Report", icon: FileText },
+      { href: "/dashboard/backlink-opportunities", label: "Backlink Opportunities", icon: Link2 },
+      { href: "/dashboard/local-seo", label: "Local SEO", icon: MapPin },
+    ],
+  },
+  {
+    label: "Strategy",
+    items: [
+      { href: "/dashboard/seo-forecast", label: "SEO Forecast", icon: TrendingUp },
     ],
   },
   {
