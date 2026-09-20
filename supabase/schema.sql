@@ -77,10 +77,22 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 
 CREATE INDEX IF NOT EXISTS idx_usage_user_date ON usage_logs(user_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS site_audits (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+  url TEXT NOT NULL,
+  pages_crawled INTEGER NOT NULL DEFAULT 0,
+  results JSONB NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_site_audits_user_date ON site_audits(user_id, created_at DESC);
+
 ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE analyses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_logs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE site_audits ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Users view own profile" ON profiles;
 CREATE POLICY "Users view own profile" ON profiles FOR SELECT USING (auth.uid() = id);
@@ -93,6 +105,8 @@ DROP POLICY IF EXISTS "Users view own subscriptions" ON subscriptions;
 CREATE POLICY "Users view own subscriptions" ON subscriptions FOR SELECT USING (auth.uid() = user_id);
 DROP POLICY IF EXISTS "Users view own usage" ON usage_logs;
 CREATE POLICY "Users view own usage" ON usage_logs FOR SELECT USING (auth.uid() = user_id);
+DROP POLICY IF EXISTS "Users view own site audits" ON site_audits;
+CREATE POLICY "Users view own site audits" ON site_audits FOR SELECT USING (auth.uid() = user_id);
 
 CREATE OR REPLACE FUNCTION update_updated_at()
 RETURNS TRIGGER AS $$

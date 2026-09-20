@@ -48,6 +48,15 @@ export interface UsageLog {
   created_at: string;
 }
 
+export interface SiteAudit {
+  id: string;
+  user_id: string;
+  url: string;
+  pages_crawled: number;
+  results: SiteAuditResult;
+  created_at: string;
+}
+
 export interface Issue {
   type: string;
   message: string;
@@ -62,6 +71,19 @@ export interface SEOAnalysis {
   readability: number;
   wordCount: number;
   issues: Issue[];
+}
+
+export interface SiteAuditResult {
+  url: string;
+  pages: Array<Record<string, unknown>>;
+  robots: { found: boolean; disallowedPaths: string[] };
+  summary: {
+    pagesCrawled: number;
+    pagesWithIssues: number;
+    brokenPages: number;
+    totalIssues: number;
+    issueCounts: Record<string, number>;
+  };
 }
 
 export interface ApiError {
@@ -98,6 +120,12 @@ export interface Database {
         Row: UsageLog;
         Insert: Omit<UsageLog, "id" | "created_at">;
         Update: Partial<UsageLog>;
+        Relationships: [];
+      };
+      site_audits: {
+        Row: SiteAudit;
+        Insert: Omit<SiteAudit, "id" | "created_at">;
+        Update: Partial<SiteAudit>;
         Relationships: [];
       };
     };

@@ -16,6 +16,7 @@ Backend-only Next.js App Router API for Supabase authentication, AI article anal
 - `GET /api/auth/callback`
 - `GET /api/user/me`, `GET /api/user/usage`
 - `POST /api/analyze`
+- `POST /api/audit`, `GET /api/audit`
 - `POST /api/stripe/checkout`, `POST /api/stripe/portal`
 - `POST /api/stripe/webhook`
 
