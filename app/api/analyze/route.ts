@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       score: result.score,
       results: result,
       tokens_used: 0,
-    }).select("id, score, results, created_at").single();
+    }).select("id, score, results, created_at, content, url").single();
     if (insertError) throw new Error(`Unable to save analysis: ${insertError.message}`);
 
     const creditsLeft = await deductCredits(user.id);
@@ -56,5 +56,23 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Article analysis failed:", error);
     return jsonError(error instanceof Error ? error.message : "Analysis failed", 500, "ANALYSIS_FAILED");
+  }
+}
+
+export async function GET() {
+  try {
+    const { user, supabase } = await getAuthenticatedUser();
+    if (!user) return jsonError("Authentication required", 401, "UNAUTHORIZED");
+    const { data, error } = await supabase
+      .from("analyses")
+      .select("id, url, score, results, created_at, content")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (error) return jsonError("Unable to load analyses", 500, "ANALYSIS_LOOKUP_FAILED");
+    return Response.json({ data: data || [] });
+  } catch (error) {
+    console.error("Analyses history failed:", error);
+    return jsonError("Authentication service is not configured", 500, "AUTH_CONFIG_ERROR");
   }
 }
